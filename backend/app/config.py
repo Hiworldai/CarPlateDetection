@@ -33,7 +33,7 @@ class Settings:
     debug: bool = os.getenv("DEBUG", "false").lower() == "true"
     database_url: str = os.getenv(
         "DATABASE_URL",
-        "mysql+pymysql://root:password@127.0.0.1:3306/car_plate_detection?charset=utf8mb4",
+        "mysql+pymysql://root:your_mysql_password@127.0.0.1:3306/car_plate_detection?charset=utf8mb4",
     )
     api_prefix: str = "/api"
     allowed_origins: list[str] = None
@@ -56,7 +56,11 @@ class Settings:
     )
     font_path: Path = _path_env("FONT_PATH", PROJECT_ROOT / "Font" / "platech.ttf")
     detect_confidence: float = float(os.getenv("DETECT_CONFIDENCE", "0.35"))
+    video_max_duration_seconds: int = int(os.getenv("VIDEO_MAX_DURATION_SECONDS", "10"))
+    video_max_upload_bytes: int = int(os.getenv("VIDEO_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
     video_frame_interval: int = int(os.getenv("VIDEO_FRAME_INTERVAL", "5"))
+    video_max_analysis_frames: int = int(os.getenv("VIDEO_MAX_ANALYSIS_FRAMES", "80"))
+    video_process_max_side: int = int(os.getenv("VIDEO_PROCESS_MAX_SIDE", "1280"))
     duplicate_frame_window: int = int(os.getenv("DUPLICATE_FRAME_WINDOW", "30"))
 
     def __post_init__(self) -> None:

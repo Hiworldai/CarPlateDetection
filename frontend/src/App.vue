@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api, login, logout, mediaUrl, recognitionParams } from './api/client'
 
 const LOCAL_RECORDS_KEY = 'car-plate-guest-records'
+const UPLOAD_GAME_SCORE_KEY = 'car-plate-upload-game-score'
 
 const imageFile = ref(null)
 const videoFile = ref(null)
@@ -22,6 +23,10 @@ const exportMessage = ref('')
 const authMessage = ref('')
 const currentJob = ref(null)
 const pollTimer = ref(null)
+const videoPollStartedAt = ref(0)
+const videoLastProgressAt = ref(0)
+const videoLastProgress = ref(0)
+const uploadGameScore = ref(0)
 const cameraTimer = ref(null)
 const videoRef = ref(null)
 const canvasRef = ref(null)
@@ -36,7 +41,7 @@ const uploadOverlay = reactive({
   sentPercent: 0,
   gameX: 50,
   gameY: 50,
-  score: 0
+  plateText: '临A·001'
 })
 
 const LARGE_FILE_BYTES = 2 * 1024 * 1024
@@ -44,6 +49,8 @@ const IMAGE_UPLOAD_MAX_SIDE = 1920
 const IMAGE_PREVIEW_MAX_SIDE = 900
 const IMAGE_UPLOAD_QUALITY = 0.86
 const IMAGE_PREVIEW_QUALITY = 0.72
+const VIDEO_MAX_DURATION_SECONDS = 10
+const VIDEO_MAX_FILE_BYTES = 10 * 1024 * 1024
 
 const auth = reactive({
   checked: false,
@@ -135,6 +142,7 @@ function showUploadOverlay(file, message) {
   uploadOverlay.fileName = file?.name || '待检测文件'
   uploadOverlay.fileSize = formatFileSize(file?.size || 0)
   uploadOverlay.sentPercent = 0
+  randomizeUploadGamePosition()
 }
 
 function updateUploadProgress(event) {
@@ -149,14 +157,38 @@ function hideUploadOverlay() {
   }, 220)
 }
 
-function moveUploadGame(event) {
-  const rect = event.currentTarget.getBoundingClientRect()
-  uploadOverlay.gameX = Math.max(6, Math.min(94, ((event.clientX - rect.left) / rect.width) * 100))
-  uploadOverlay.gameY = Math.max(10, Math.min(90, ((event.clientY - rect.top) / rect.height) * 100))
+function randomPlateCode() {
+  const region = ['临', '京', '沪', '浙', '粤', '苏'][Math.floor(Math.random() * 6)]
+  const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
+  const digits = String(Math.floor(Math.random() * 1000)).padStart(3, '0')
+  return `${region}${letters[Math.floor(Math.random() * letters.length)]}·${digits}`
+}
+
+function randomizeUploadGamePosition() {
+  uploadOverlay.gameX = 14 + Math.random() * 72
+  uploadOverlay.gameY = 18 + Math.random() * 52
+  uploadOverlay.plateText = randomPlateCode()
 }
 
 function scoreUploadGame() {
-  uploadOverlay.score += 1
+  uploadGameScore.value += 1
+  localStorage.setItem(UPLOAD_GAME_SCORE_KEY, String(uploadGameScore.value))
+  randomizeUploadGamePosition()
+}
+
+function formatDuration(ms) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return minutes ? `${minutes}分${String(seconds).padStart(2, '0')}秒` : `${seconds}秒`
+}
+
+function videoProgressText(job) {
+  const progress = Number(job.progress || 0).toFixed(1)
+  const frames =
+    job.total_frames > 0 ? `，已读 ${job.processed_frames || 0}/${job.total_frames} 帧` : ''
+  const elapsed = videoPollStartedAt.value ? `，已处理 ${formatDuration(Date.now() - videoPollStartedAt.value)}` : ''
+  return `视频后台识别中：${progress}%${frames}${elapsed}。`
 }
 
 function revokeImagePreview() {
@@ -215,6 +247,44 @@ async function prepareImageForUpload(file) {
     type: 'image/jpeg',
     lastModified: Date.now()
   })
+}
+
+function getVideoDuration(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
+    const video = document.createElement('video')
+    const timer = window.setTimeout(() => {
+      cleanup()
+      reject(new Error('读取视频时长超时'))
+    }, 5000)
+    const cleanup = () => {
+      window.clearTimeout(timer)
+      URL.revokeObjectURL(url)
+      video.removeAttribute('src')
+      video.load()
+    }
+    video.preload = 'metadata'
+    video.onloadedmetadata = () => {
+      const duration = Number.isFinite(video.duration) ? video.duration : 0
+      cleanup()
+      resolve(duration)
+    }
+    video.onloadeddata = () => {
+      const duration = Number.isFinite(video.duration) ? video.duration : 0
+      if (!duration) return
+      cleanup()
+      resolve(duration)
+    }
+    video.onerror = () => {
+      cleanup()
+      reject(new Error('无法读取视频时长'))
+    }
+    video.src = url
+  })
+}
+
+function isPreferredVideoFormat(file) {
+  return file?.type === 'video/mp4' || /\.mp4$/i.test(file?.name || '')
 }
 
 function normalizeRecord(raw) {
@@ -285,10 +355,36 @@ function setImageFile(event) {
   buildPreview(file)
 }
 
-function setVideoFile(event) {
+async function setVideoFile(event) {
   const [file] = event.target.files || []
-  videoFile.value = file || null
   videoMessage.value = ''
+
+  if (!file) {
+    videoFile.value = null
+    return
+  }
+
+  if (file.size > VIDEO_MAX_FILE_BYTES) {
+    videoFile.value = null
+    event.target.value = ''
+    videoMessage.value = `由于服务器限制，视频文件大小最多约 ${formatFileSize(VIDEO_MAX_FILE_BYTES)}。你当前这个文件约 ${formatFileSize(file.size)}。`
+    return
+  }
+
+  try {
+    const duration = await getVideoDuration(file)
+    if (duration > VIDEO_MAX_DURATION_SECONDS) {
+      videoFile.value = null
+      event.target.value = ''
+      videoMessage.value = `由于服务器限制，最多只能上传 ${VIDEO_MAX_DURATION_SECONDS} 秒的视频。你当前这个视频约 ${duration.toFixed(1)} 秒。`
+      return
+    }
+    videoFile.value = file
+    videoMessage.value = `已选择视频，时长 ${duration.toFixed(1)} 秒，大小 ${formatFileSize(file.size)}。由于服务器限制，最多支持 ${VIDEO_MAX_DURATION_SECONDS} 秒、约 ${formatFileSize(VIDEO_MAX_FILE_BYTES)}。${isPreferredVideoFormat(file) ? '' : ' 建议先转成 MP4（H.264）再上传，会更稳更快。'}`
+  } catch {
+    videoFile.value = file
+    videoMessage.value = `已选择视频，大小 ${formatFileSize(file.size)}。上传时会继续校验时长和大小。${isPreferredVideoFormat(file) ? '' : ' 建议先转成 MP4（H.264）再上传，会更稳更快。'}`
+  }
 }
 
 function applyGuestAuthState(message = '') {
@@ -377,7 +473,10 @@ async function uploadVideo() {
 
   loading.value = true
   try {
-    showUploadOverlay(videoFile.value, '视频会先上传，再进入后台逐帧识别。传输完成后可以看进度条。')
+    showUploadOverlay(
+      videoFile.value,
+      `视频会先上传，再进入后台抽帧识别。由于服务器限制，最多只能上传 ${VIDEO_MAX_DURATION_SECONDS} 秒、约 ${formatFileSize(VIDEO_MAX_FILE_BYTES)} 的视频。`
+    )
     const formData = new FormData()
     formData.append('file', videoFile.value)
 
@@ -402,10 +501,18 @@ async function uploadVideo() {
 
 function startPollingJob(jobId, persisted) {
   stopPollingJob()
+  videoPollStartedAt.value = Date.now()
+  videoLastProgressAt.value = Date.now()
+  videoLastProgress.value = 0
   pollTimer.value = window.setInterval(async () => {
     try {
       const response = await api.get(`/jobs/${jobId}`)
       currentJob.value = response.data
+      const progress = Number(response.data.progress || 0)
+      if (progress > videoLastProgress.value) {
+        videoLastProgress.value = progress
+        videoLastProgressAt.value = Date.now()
+      }
       if (['completed', 'failed'].includes(response.data.status)) {
         stopPollingJob()
         if (response.data.status === 'completed') {
@@ -420,6 +527,12 @@ function startPollingJob(jobId, persisted) {
         } else {
           videoMessage.value = response.data.error_message || '视频识别失败'
         }
+      } else {
+        const stalledSeconds = Math.floor((Date.now() - videoLastProgressAt.value) / 1000)
+        videoMessage.value =
+          stalledSeconds >= 20
+            ? `${videoProgressText(response.data)} 当前这一帧比较慢，我还在等服务器返回。`
+            : videoProgressText(response.data)
       }
     } catch (error) {
       stopPollingJob()
@@ -544,6 +657,21 @@ function exportGuestCsv() {
   exportMessage.value = '游客记录已导出到当前浏览器'
 }
 
+function clearLocalCache() {
+  localStorage.removeItem(LOCAL_RECORDS_KEY)
+  localStorage.removeItem(UPLOAD_GAME_SCORE_KEY)
+  uploadGameScore.value = 0
+  latestRecords.value = []
+  currentJob.value = null
+  imageFile.value = null
+  videoFile.value = null
+  imageMessage.value = ''
+  videoMessage.value = ''
+  revokeImagePreview()
+  refreshGuestRecords(1)
+  exportMessage.value = '本地缓存已清除。'
+}
+
 async function exportRecords() {
   exportMessage.value = ''
   if (isGuestMode.value) {
@@ -577,6 +705,7 @@ watch(
 )
 
 onMounted(async () => {
+  uploadGameScore.value = Number(localStorage.getItem(UPLOAD_GAME_SCORE_KEY) || 0)
   await initializeGuestMode()
   await fetchRecords(1)
 })
@@ -626,6 +755,7 @@ onBeforeUnmount(() => {
       <div class="tool-panel">
         <h2>视频识别</h2>
         <input type="file" accept="video/*" @change="setVideoFile" />
+        <p class="status-text">推荐 MP4（H.264）格式；由于服务器限制，最多只能上传 10 秒、约 10 MB 的视频。</p>
         <button type="button" :disabled="loading || !videoFile" @click="uploadVideo">上传视频</button>
         <div v-if="currentJob" class="progress-row">
           <span>{{ currentJob.status }}</span>
@@ -668,7 +798,10 @@ onBeforeUnmount(() => {
           <p class="eyebrow">Records</p>
           <h2>{{ isGuestMode ? '游客本地记录' : '服务器识别记录' }}</h2>
         </div>
-        <button type="button" @click="exportRecords">{{ isGuestMode ? '导出本地 CSV' : '导出服务器 Excel' }}</button>
+        <div class="action-row">
+          <button type="button" @click="exportRecords">{{ isGuestMode ? '导出本地 CSV' : '导出服务器 Excel' }}</button>
+          <button class="ghost-button" type="button" @click="clearLocalCache">清除本地缓存</button>
+        </div>
       </div>
 
       <form class="filters" @submit.prevent="fetchRecords(1)">
@@ -755,19 +888,33 @@ onBeforeUnmount(() => {
           <span>{{ uploadOverlay.sentPercent }}%</span>
           <progress :value="uploadOverlay.sentPercent" max="100"></progress>
         </div>
-        <div class="wait-game" @pointermove="moveUploadGame" @pointerdown="scoreUploadGame">
+        <div class="wait-game">
           <span class="game-road"></span>
-          <button
-            class="game-plate"
-            type="button"
-            :style="{ left: `${uploadOverlay.gameX}%`, top: `${uploadOverlay.gameY}%` }"
-            @click="scoreUploadGame"
-          >
-            临A·{{ String(uploadOverlay.score).padStart(3, '0') }}
+          <button class="game-plate" type="button" :style="{ left: `${uploadOverlay.gameX}%`, top: `${uploadOverlay.gameY}%` }" @click="scoreUploadGame">
+            {{ uploadOverlay.plateText }}
           </button>
-          <p>移动鼠标追车牌，点一下加分：{{ uploadOverlay.score }}</p>
+          <p>框内会随机刷出车牌，点一下加一分：{{ uploadGameScore }}</p>
         </div>
       </section>
     </div>
+    <footer class="site-beian-footer" aria-label="网站备案信息">
+      <a
+        class="site-beian-link"
+        href="https://beian.miit.gov.cn/"
+        rel="noreferrer"
+        target="_blank"
+      >
+        蜀ICP备2026021532号
+      </a>
+      <a
+        class="site-beian-link police-beian-link"
+        href="https://beian.mps.gov.cn/#/query/webSearch?code=51012402001673"
+        rel="noreferrer"
+        target="_blank"
+      >
+        <img src="/beian/beian-police.png" alt="" aria-hidden="true">
+        <span>川公网安备51012402001673号</span>
+      </a>
+    </footer>
   </main>
 </template>

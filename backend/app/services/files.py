@@ -4,6 +4,7 @@ import shutil
 import uuid
 from pathlib import Path
 
+import cv2
 from fastapi import UploadFile
 
 
@@ -30,3 +31,17 @@ def save_upload_file(upload: UploadFile, directory: Path, prefix: str = "") -> P
     with destination.open("wb") as output:
         shutil.copyfileobj(upload.file, output)
     return destination
+
+
+def get_video_duration_seconds(path: Path) -> float | None:
+    cap = cv2.VideoCapture(str(path))
+    try:
+        if not cap.isOpened():
+            return None
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
+        frame_count = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if fps <= 0 or frame_count <= 0:
+            return None
+        return frame_count / fps
+    finally:
+        cap.release()

@@ -13,7 +13,7 @@ from ..dependencies import get_db, get_optional_user, get_recognizer
 from ..models import RecognitionJob, RecognitionRecord
 from ..schemas import ImageRecognitionOut, JobCreateOut, JobOut, RecognitionListOut, RecognitionRecordOut
 from ..services.exporter import build_excel
-from ..services.files import save_upload_file
+from ..services.files import get_video_duration_seconds, save_upload_file
 from ..services.recognizer import PlateDetection, PlateRecognizer
 from ..services.records import build_record_query, list_records
 from ..services.video import process_guest_video_job, process_video_job
@@ -99,8 +99,24 @@ def recognize_video(
     user: str | None = Depends(get_optional_user),
 ) -> JobCreateOut:
     upload_path = save_upload_file(file, settings.upload_dir / "uploads", prefix="video")
+    upload_size = Path(upload_path).stat().st_size
+    if upload_size > settings.video_max_upload_bytes:
+        Path(upload_path).unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400,
+            detail=f"由于服务器限制，视频文件大小最多约 {settings.video_max_upload_bytes // 1024 // 1024} MB。",
+        )
+
     persisted = bool(user)
     job_id = str(uuid.uuid4())
+
+    duration_seconds = get_video_duration_seconds(upload_path)
+    if duration_seconds is not None and duration_seconds > settings.video_max_duration_seconds:
+        Path(upload_path).unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400,
+            detail=f"由于服务器限制，最多只能上传 {settings.video_max_duration_seconds} 秒的视频。",
+        )
 
     if persisted:
         job = RecognitionJob(id=job_id, source_type="video", filename=file.filename, status="queued", progress=0)

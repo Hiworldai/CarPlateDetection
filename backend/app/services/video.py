@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +31,41 @@ def _record_out_from_detection(detection: PlateDetection) -> RecognitionRecordOu
     )
 
 
+def _video_analysis_interval(total_frames: int) -> int:
+    base_interval = max(1, settings.video_frame_interval)
+    if total_frames <= 0 or settings.video_max_analysis_frames <= 0:
+        return base_interval
+    capped_interval = math.ceil(total_frames / settings.video_max_analysis_frames)
+    return max(base_interval, capped_interval)
+
+
+def _should_analyze_frame(frame_index: int, interval: int) -> bool:
+    return frame_index == 1 or frame_index % interval == 0
+
+
+def _resize_video_frame(frame):
+    max_side = max(0, settings.video_process_max_side)
+    if not max_side:
+        return frame
+
+    height, width = frame.shape[:2]
+    current_side = max(height, width)
+    if current_side <= max_side:
+        return frame
+
+    scale = max_side / float(current_side)
+    resized_width = max(1, int(width * scale))
+    resized_height = max(1, int(height * scale))
+    return cv2.resize(frame, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
+
+
+def _grab_next_frame(cap: cv2.VideoCapture, frame_index: int) -> tuple[bool, int]:
+    grabbed = cap.grab()
+    if not grabbed:
+        return False, frame_index
+    return True, frame_index + 1
+
+
 def process_video_job(job_id: str, video_path: str, source_filename: str | None, recognizer: PlateRecognizer) -> None:
     db = SessionLocal()
     cap = None
@@ -49,19 +86,36 @@ def process_video_job(job_id: str, video_path: str, source_filename: str | None,
         db.commit()
 
         frame_index = 0
+        analysis_interval = _video_analysis_interval(total_frames)
+        last_progress_commit = time.monotonic()
         last_seen: dict[str, int] = {}
 
         while True:
-            success, frame = cap.read()
-            if not success:
+            grabbed, frame_index = _grab_next_frame(cap, frame_index)
+            if not grabbed:
                 break
 
-            frame_index += 1
-            if frame_index % settings.video_frame_interval != 0:
+            if not _should_analyze_frame(frame_index, analysis_interval):
+                if time.monotonic() - last_progress_commit >= 1:
+                    job.processed_frames = frame_index
+                    job.progress = round((frame_index / total_frames) * 100, 2) if total_frames else 0
+                    job.updated_at = app_now()
+                    db.commit()
+                    last_progress_commit = time.monotonic()
                 continue
 
+            success, frame = cap.retrieve()
+            if not success:
+                continue
+
+            job.processed_frames = frame_index
+            job.progress = round((frame_index / total_frames) * 100, 2) if total_frames else 0
+            job.updated_at = app_now()
+            db.commit()
+            last_progress_commit = time.monotonic()
+
             detections = recognizer.recognize_frame(
-                frame,
+                _resize_video_frame(frame),
                 source_type="video",
                 source_filename=source_filename,
                 frame_index=frame_index,
@@ -93,6 +147,7 @@ def process_video_job(job_id: str, video_path: str, source_filename: str | None,
             job.progress = round((frame_index / total_frames) * 100, 2) if total_frames else 0
             job.updated_at = app_now()
             db.commit()
+            last_progress_commit = time.monotonic()
 
         job.status = "completed"
         job.progress = 100.0
@@ -140,20 +195,35 @@ def process_guest_video_job(
         job["total_frames"] = total_frames
 
         frame_index = 0
+        analysis_interval = _video_analysis_interval(total_frames)
+        last_progress_update = time.monotonic()
         last_seen: dict[str, int] = {}
         output_records: list[RecognitionRecordOut] = []
 
         while True:
-            success, frame = cap.read()
-            if not success:
+            grabbed, frame_index = _grab_next_frame(cap, frame_index)
+            if not grabbed:
                 break
 
-            frame_index += 1
-            if frame_index % settings.video_frame_interval != 0:
+            if not _should_analyze_frame(frame_index, analysis_interval):
+                if time.monotonic() - last_progress_update >= 1:
+                    job["processed_frames"] = frame_index
+                    job["progress"] = round((frame_index / total_frames) * 100, 2) if total_frames else 0
+                    job["updated_at"] = app_now()
+                    last_progress_update = time.monotonic()
                 continue
 
+            success, frame = cap.retrieve()
+            if not success:
+                continue
+
+            job["processed_frames"] = frame_index
+            job["progress"] = round((frame_index / total_frames) * 100, 2) if total_frames else 0
+            job["updated_at"] = app_now()
+            last_progress_update = time.monotonic()
+
             detections = recognizer.recognize_frame(
-                frame,
+                _resize_video_frame(frame),
                 source_type="video",
                 source_filename=source_filename,
                 frame_index=frame_index,
@@ -172,6 +242,7 @@ def process_guest_video_job(
             job["processed_frames"] = frame_index
             job["progress"] = round((frame_index / total_frames) * 100, 2) if total_frames else 0
             job["updated_at"] = app_now()
+            last_progress_update = time.monotonic()
 
         job["status"] = "completed"
         job["progress"] = 100.0

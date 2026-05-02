@@ -35,7 +35,11 @@ services:
       OCR_REC_MODEL_DIR: /app/paddleModels/whl/rec/ch/ch_PP-OCRv4_rec_infer
       FONT_PATH: /app/Font/platech.ttf
       DETECT_CONFIDENCE: "0.35"
+      VIDEO_MAX_DURATION_SECONDS: "10"
+      VIDEO_MAX_UPLOAD_BYTES: "10485760"
       VIDEO_FRAME_INTERVAL: "5"
+      VIDEO_MAX_ANALYSIS_FRAMES: "80"
+      VIDEO_PROCESS_MAX_SIDE: "1280"
       DUPLICATE_FRAME_WINDOW: "30"
     volumes:
       - backend_storage:/app/backend/storage
