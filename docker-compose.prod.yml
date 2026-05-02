@@ -1,0 +1,58 @@
+services:
+  db:
+    image: docker.m.daocloud.io/library/mariadb:12.2
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?set MARIADB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${MARIADB_DATABASE:-car_plate_detection}
+      MARIADB_USER: ${MARIADB_USER:-plate_user}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD:?set MARIADB_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u$${MARIADB_USER} -p$${MARIADB_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      APP_NAME: Car Plate Recognition API
+      DEBUG: "false"
+      DATABASE_URL: mysql+pymysql://${MARIADB_USER:-plate_user}:${MARIADB_PASSWORD:?set MARIADB_PASSWORD}@db:3306/${MARIADB_DATABASE:-car_plate_detection}?charset=utf8mb4
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost,http://127.0.0.1}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:?set ADMIN_USERNAME}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
+      UPLOAD_DIR: /app/backend/storage
+      YOLO_MODEL_PATH: /app/models/best.pt
+      OCR_CLS_MODEL_DIR: /app/paddleModels/whl/cls/ch_ppocr_mobile_v2.0_cls_infer
+      OCR_DET_MODEL_DIR: /app/paddleModels/whl/det/ch/ch_PP-OCRv4_det_infer
+      OCR_REC_MODEL_DIR: /app/paddleModels/whl/rec/ch/ch_PP-OCRv4_rec_infer
+      FONT_PATH: /app/Font/platech.ttf
+      DETECT_CONFIDENCE: "0.35"
+      VIDEO_FRAME_INTERVAL: "5"
+      DUPLICATE_FRAME_WINDOW: "30"
+    volumes:
+      - backend_storage:/app/backend/storage
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18080:80"
+    depends_on:
+      - backend
+
+volumes:
+  mysql_data:
+  backend_storage:

@@ -1,0 +1,8 @@
+.env
+storage/uploads/*
+storage/plates/*
+storage/frames/*
+mariadb-data/
+!storage/uploads/.gitkeep
+!storage/plates/.gitkeep
+!storage/frames/.gitkeep
