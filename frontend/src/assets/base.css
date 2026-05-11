@@ -193,6 +193,24 @@ a {
   object-fit: cover;
 }
 
+.camera-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.camera-device-field {
+  display: grid;
+  width: 100%;
+  gap: 6px;
+  color: #34495e;
+  font-size: 14px;
+}
+
+.camera-device-field span {
+  font-weight: 700;
+}
+
 .button-row,
 .progress-row,
 .action-row,
@@ -467,6 +485,11 @@ a {
 
   .tool-panel {
     min-height: auto;
+  }
+
+  .camera-controls,
+  .button-row {
+    align-items: stretch;
   }
 
   .auth-panel,

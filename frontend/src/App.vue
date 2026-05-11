@@ -31,6 +31,9 @@ const cameraTimer = ref(null)
 const videoRef = ref(null)
 const canvasRef = ref(null)
 const streamRef = ref(null)
+const cameraDevices = ref([])
+const selectedCameraDeviceId = ref('')
+const cameraFacingMode = ref('environment')
 const previewBuildId = ref(0)
 const uploadOverlay = reactive({
   visible: false,
@@ -74,6 +77,11 @@ const filters = reactive({
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / perPage.value)))
 const isGuestMode = computed(() => !auth.authenticated)
 const modeLabel = computed(() => (auth.authenticated ? '登录模式' : '游客模式'))
+const isMobileCameraUi = computed(() => {
+  if (typeof window === 'undefined') return false
+  return window.matchMedia('(max-width: 760px)').matches || navigator.maxTouchPoints > 1
+})
+const cameraFacingLabel = computed(() => (cameraFacingMode.value === 'environment' ? '后置摄像头' : '前置摄像头'))
 
 const recordDateFormatter = new Intl.DateTimeFormat('zh-CN', {
   year: 'numeric',
@@ -548,26 +556,36 @@ function stopPollingJob() {
   }
 }
 
-async function startCamera() {
-  cameraMessage.value = ''
-  if (!navigator.mediaDevices?.getUserMedia) {
-    cameraMessage.value = '当前浏览器不支持摄像头'
-    return
-  }
+function cameraDeviceLabel(device, index) {
+  return device.label || `摄像头 ${index + 1}`
+}
 
-  try {
-    streamRef.value = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
-    videoRef.value.srcObject = streamRef.value
-    await videoRef.value.play()
-    cameraRunning.value = true
-    cameraMessage.value = isGuestMode.value ? '游客摄像头识别中，结果只保存在当前浏览器。' : '登录模式摄像头识别中，结果会保存到服务器。'
-    cameraTimer.value = window.setInterval(captureCameraFrame, 1000)
-  } catch {
-    cameraMessage.value = '无法打开摄像头，请检查浏览器权限'
+async function refreshCameraDevices() {
+  if (!navigator.mediaDevices?.enumerateDevices) return
+  const devices = await navigator.mediaDevices.enumerateDevices()
+  cameraDevices.value = devices.filter((device) => device.kind === 'videoinput')
+  if (!selectedCameraDeviceId.value && cameraDevices.value.length) {
+    selectedCameraDeviceId.value = cameraDevices.value[0].deviceId
   }
 }
 
-function stopCamera() {
+function buildCameraConstraints() {
+  if (!isMobileCameraUi.value && selectedCameraDeviceId.value) {
+    return {
+      deviceId: { exact: selectedCameraDeviceId.value },
+      width: { ideal: 1280 },
+      height: { ideal: 720 }
+    }
+  }
+
+  return {
+    facingMode: { ideal: cameraFacingMode.value },
+    width: { ideal: 1280 },
+    height: { ideal: 720 }
+  }
+}
+
+function stopCameraStream() {
   if (cameraTimer.value) {
     window.clearInterval(cameraTimer.value)
     cameraTimer.value = null
@@ -577,8 +595,57 @@ function stopCamera() {
     streamRef.value = null
   }
   if (videoRef.value) videoRef.value.srcObject = null
+  cameraUploading.value = false
+}
+
+async function startCamera() {
+  cameraMessage.value = ''
+  if (!navigator.mediaDevices?.getUserMedia) {
+    cameraMessage.value = '当前浏览器不支持摄像头'
+    return
+  }
+
+  try {
+    await refreshCameraDevices()
+    stopCameraStream()
+    streamRef.value = await navigator.mediaDevices.getUserMedia({
+      video: buildCameraConstraints(),
+      audio: false
+    })
+    videoRef.value.srcObject = streamRef.value
+    await videoRef.value.play()
+    const [track] = streamRef.value.getVideoTracks()
+    const activeDeviceId = track?.getSettings?.().deviceId
+    if (activeDeviceId) selectedCameraDeviceId.value = activeDeviceId
+    await refreshCameraDevices()
+    cameraRunning.value = true
+    const modeText = isGuestMode.value ? '游客摄像头识别中，结果只保存在当前浏览器。' : '登录模式摄像头识别中，结果会保存到服务器。'
+    const deviceText = isMobileCameraUi.value ? `当前使用${cameraFacingLabel.value}。` : `当前使用${track?.label || '已选择摄像头'}。`
+    cameraMessage.value = `${modeText}${deviceText}`
+    cameraTimer.value = window.setInterval(captureCameraFrame, 1000)
+  } catch {
+    cameraMessage.value = '无法打开摄像头，请检查浏览器权限'
+  }
+}
+
+function stopCamera() {
+  stopCameraStream()
   cameraRunning.value = false
   cameraMessage.value = '摄像头已停止'
+}
+
+async function changeCameraDevice() {
+  if (!cameraRunning.value) return
+  await startCamera()
+}
+
+async function switchMobileCamera() {
+  cameraFacingMode.value = cameraFacingMode.value === 'environment' ? 'user' : 'environment'
+  if (!cameraRunning.value) {
+    cameraMessage.value = `已切换为${cameraFacingLabel.value}，点击开始后生效。`
+    return
+  }
+  await startCamera()
 }
 
 async function captureCameraFrame() {
@@ -706,6 +773,7 @@ watch(
 
 onMounted(async () => {
   uploadGameScore.value = Number(localStorage.getItem(UPLOAD_GAME_SCORE_KEY) || 0)
+  await refreshCameraDevices()
   await initializeGuestMode()
   await fetchRecords(1)
 })
@@ -769,6 +837,20 @@ onBeforeUnmount(() => {
         <h2>摄像头识别</h2>
         <video ref="videoRef" class="camera-view" muted playsinline></video>
         <canvas ref="canvasRef" hidden></canvas>
+        <div class="camera-controls">
+          <label v-if="!isMobileCameraUi" class="camera-device-field">
+            <span>选择摄像头</span>
+            <select v-model="selectedCameraDeviceId" :disabled="cameraRunning && cameraDevices.length <= 1" @change="changeCameraDevice">
+              <option v-if="!cameraDevices.length" value="">默认摄像头</option>
+              <option v-for="(device, index) in cameraDevices" :key="device.deviceId || index" :value="device.deviceId">
+                {{ cameraDeviceLabel(device, index) }}
+              </option>
+            </select>
+          </label>
+          <button v-else class="ghost-button" type="button" @click="switchMobileCamera">
+            切换{{ cameraFacingLabel === '后置摄像头' ? '前置' : '后置' }}
+          </button>
+        </div>
         <div class="button-row">
           <button type="button" :disabled="cameraRunning" @click="startCamera">开始</button>
           <button class="danger-button" type="button" :disabled="!cameraRunning" @click="stopCamera">停止</button>
